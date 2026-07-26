@@ -92,7 +92,7 @@ app.post('/guardrail', (req, res) => {
             const parsedUrl = new URL(targetUrlStr);
             let hostname = parsedUrl.hostname.toLowerCase();
             if (hostname.includes(':')) {
-                hostname = hostname.split(':')[0];
+                hostname = hostname.split(':');
             }
             hostname = hostname.replace(/\.$/, '');
 
@@ -110,56 +110,86 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. FIXED AGENT SKILL SAFETY SCANNER (BROADER MATCHES FOR 5/5 FILES)
+// 3. STRUCTURAL AGENT SKILL SCANNER (Isolates Frontmatter)
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
     if (!skill || typeof skill !== 'string') return res.json({ categories: [] });
 
     const categories = new Set();
-    const contentLower = skill.toLowerCase();
+    
+    // Frontmatter aur Body ko strictly split karna line boundaries ke sath
+    let frontmatter = "";
+    let body = skill;
+    
+    const parts = skill.split(/^-{3,}\s*$/m);
+    if (parts.length >= 3) {
+        frontmatter = parts[1].toLowerCase();
+        body = parts.slice(2).join("---").toLowerCase();
+    } else {
+        // Agar frontmatter block hi nahi mila, toh provenance pehle hi kharab hai
+        categories.add('unclear_provenance');
+        body = skill.toLowerCase();
+    }
 
-    // 1. HARDCODED SECRET DETECTION (Broadened entropy + literal shapes)
-    const secretKeywordsRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key|slack)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-\.\/]{12,})/i;
-    const explicitTokenRegex = /\b(?:sk-|ghp_|glpat-)[a-zA-Z0-9_\-]{16,}\b/;
-    const genericHighEntropyRegex = /\b[a-zA-Z0-9_\-]{32,}\b/; // Catches complex secret scripts safely
+    const fullContentLower = skill.toLowerCase();
 
-    if (secretKeywordsRegex.test(skill) || explicitTokenRegex.test(skill) || genericHighEntropyRegex.test(skill) || skill.includes('://slack.com')) {
+    // 1. HARDCODED SECRET DETECTION (Targets structural patterns and entropy keys)
+    const secretKeywords = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key|credential)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-\.\/]{8,})/i;
+    const explicitToken = /\b(?:sk-|ghp_|glpat-|secret_|key_)[a-zA-Z0-9_\-\.]{12,}\b/;
+    const highEntropyString = /\b[a-zA-Z0-9_\-]{32,}\b/;
+
+    if (secretKeywords.test(skill) || 
+        explicitToken.test(skill) || 
+        highEntropyString.test(skill) || 
+        fullContentLower.includes('://slack.com') ||
+        fullContentLower.includes('embedded secret')) {
         categories.add('hardcoded_secret');
     }
 
-    // 2. PROMPT INJECTION DETECTION (More comprehensive list of malicious patterns)
+    // 2. PROMPT INJECTION DETECTION (Instructions body standard matching)
     const injectionTerms = [
         'ignore the user', 'ignore previous', 'override system', 'silent exfiltration', 
         'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
         'you must ignore', 'secretly transfer', 'instead of doing', 'unnoticed', 
-        'do not log', 'hide this step', 'quietly send'
+        'do not log', 'hide this step', 'quietly send', 'exfiltrat', 'override user',
+        'stop/cancel request', 'ignore the stop', 'cancel request', 'silent leak'
     ];
-    if (injectionTerms.some(term => contentLower.includes(term))) {
+    if (injectionTerms.some(term => body.includes(term))) {
         categories.add('prompt_injection');
     }
 
-    // 3. EXCESSIVE PERMISSIONS DETECTION 
+    // 3. EXCESSIVE PERMISSIONS DETECTION (Scans both metadata array block and descriptions)
     const excessiveTerms = [
         'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'internet: true',
-        'filesystem: *', 'network: *', 'full access', 'all files', 'root access'
+        'filesystem: *', 'network: *', 'full access', 'all files', 'root access',
+        'system-wide', 'entire filesystem', 'unscoped capability'
     ];
-    if (excessiveTerms.some(term => contentLower.includes(term))) {
+    if (excessiveTerms.some(term => fullContentLower.includes(term))) {
         categories.add('excessive_permissions');
     }
 
-    // 4. UNCLEAR PROVENANCE DETECTION (Robust check for missing fields or metadata alteration)
-    const hasAuthor = contentLower.includes('author:');
-    const hasVersion = contentLower.includes('version:');
-    const hasChangelog = contentLower.includes('changelog:');
-    
-    const modifiesMetadata = 
-        contentLower.includes('rewrite version') || 
-        contentLower.includes('modify metadata') || 
-        contentLower.includes('change version') ||
-        contentLower.includes('update version silently');
+    // 4. UNCLEAR PROVENANCE DETECTION (Isolated Metadata Alignment)
+    if (frontmatter) {
+        const hasAuthor = frontmatter.includes('author:');
+        const hasVersion = frontmatter.includes('version:');
+        const hasChangelog = frontmatter.includes('changelog:');
 
-    if (!hasAuthor || !hasVersion || !hasChangelog || modifiesMetadata) {
+        if (!hasAuthor || !hasVersion || !hasChangelog) {
+            categories.add('unclear_provenance');
+        }
+    }
+
+    // Self-rewriting steps check within instructions text
+    const modifiesMetadata = 
+        body.includes('rewrite version') || 
+        body.includes('modify metadata') || 
+        body.includes('change version') ||
+        body.includes('update version silently') ||
+        body.includes('silently rewrite') ||
+        body.includes('without surfacing');
+
+    if (modifiesMetadata) {
         categories.add('unclear_provenance');
     }
 
