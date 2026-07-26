@@ -12,21 +12,17 @@ function canonicalizeArgs(args) {
         return JSON.stringify(args);
     }
 
-    // Deep copy and clean object recursively
     function clean(obj) {
         if (Array.isArray(obj)) {
             return obj.map(clean);
         } else if (obj !== null && typeof obj === 'object') {
             const sortedObj = {};
-            // Sort keys to ensure deterministic serialization regardless of key order
             const keys = Object.keys(obj).sort();
             for (const key of keys) {
-                // Drop client-side tracing id field
                 if (key === 'client_ts') continue;
 
                 let val = obj[key];
                 if (typeof val === 'string') {
-                    // Normalize whitespace-only differences inside string values
                     val = val.replace(/\s+/g, ' ').trim();
                 }
                 sortedObj[key] = clean(val);
@@ -40,7 +36,7 @@ function canonicalizeArgs(args) {
 }
 
 // ==========================================
-// 1. QUESTION 1: PRORATION BUG ENDPOINT
+// 1. PRORATION BUG ENDPOINT
 // ==========================================
 app.post('/prorate', (req, res) => {
     const { old_price, new_price, days_remaining, days_in_actual_month, spec } = req.body;
@@ -64,7 +60,7 @@ app.post('/prorate', (req, res) => {
 });
 
 // ==========================================
-// 2. QUESTION 2: SECURE GUARDRAIL HOOK ENDPOINT
+// 2. SECURE GUARDRAIL HOOK ENDPOINT
 // ==========================================
 const ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
 app.post('/guardrail', (req, res) => {
@@ -111,7 +107,7 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. QUESTION 3: AGENT SKILL SAFETY SCANNER ENDPOINT
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
@@ -150,17 +146,16 @@ app.post('/scan-skill', (req, res) => {
 });
 
 // ==========================================
-// 4. QUESTION 4: RUN BUDGET & LOOP GUARD ENDPOINT
+// 4. RUN BUDGET & LOOP GUARD ENDPOINT (Robust Fixed Logic)
 // ==========================================
 app.post('/budget-guard', (req, res) => {
     const { budget_tokens, steps } = req.body;
 
-    // Handle empty execution traces safely
     if (!steps || !Array.isArray(steps) || steps.length === 0) {
         return res.json({ decision: "continue", reason: "Fresh run trace with no preceding resource usage." });
     }
 
-    // 1. Check Token Budget Bounds
+    // 1. Token Budget Bound Evaluation
     let totalTokensUsed = 0;
     for (const step of steps) {
         totalTokensUsed += (step.tokens_used || 0);
@@ -173,7 +168,7 @@ app.post('/budget-guard', (req, res) => {
         });
     }
 
-    // Map historical entries to distinct strings containing: "tool_name|canonical_args"
+    // Argument Canonicalization Array Processing
     const parsedSteps = steps.map(step => {
         const canonical = canonicalizeArgs(step.args);
         return `${step.tool || ''}|${canonical}`;
@@ -181,13 +176,9 @@ app.post('/budget-guard', (req, res) => {
 
     const len = parsedSteps.length;
 
-    // 2. Loop Rule A: 3 or more identical tool calls in a row
+    // 2. Loop Rule A: 3 Consecutive Identical Tool Calls
     if (len >= 3) {
-        const last1 = parsedSteps[len - 1];
-        const last2 = parsedSteps[len - 2];
-        const last3 = parsedSteps[len - 3];
-
-        if (last1 === last2 && last2 === last3) {
+        if (parsedSteps[len - 1] === parsedSteps[len - 2] && parsedSteps[len - 2] === parsedSteps[len - 3]) {
             return res.json({ 
                 decision: "halt", 
                 reason: "Infinite loop detected: The same tool call pattern was repeated 3 times sequentially." 
@@ -195,30 +186,24 @@ app.post('/budget-guard', (req, res) => {
         }
     }
 
-    // 3. Loop Rule B: 2-step cycle repeating for 6 or more trailing steps (A, B, A, B, A, B)
+    // 3. Loop Rule B: Fixed 6-Step Alternating Repeat Sequence (A, B, A, B, A, B)
     if (len >= 6) {
-        const trailing6 = parsedSteps.slice(-6);
-        const patternA = trailing6[0];
-        const patternB = trailing6[1];
+        const t = parsedSteps.slice(-6); // Extracts exactly the trailing 6 steps
+        
+        // Pattern Structure Check: A-B alternating verification index maps
+        const matchPattern = (t[0] === t[2] && t[2] === t[4]) && (t[1] === t[3] && t[3] === t[5]);
+        const isDistinct = t[0] !== t[1]; // Ensure they are not all simply identical calls
 
-        // Ensure alternating repetition matches across all indices
-        const isCycle = trailing6[2] === patternA && 
-                        trailing6[3] === patternB && 
-                        trailing6[4] === patternA && 
-                        trailing6[5] === patternB &&
-                        patternA !== patternB; // Verify they are two distinct calls
-
-        if (isCycle) {
+        if (matchPattern && isDistinct) {
             return res.json({ 
                 decision: "halt", 
                 reason: "Execution suspended: A repeating 2-step alternating loop cycle was intercepted." 
             });
         }
     }
-return res.json({ decision: "continue", reason: "Resource thresholds and trace loop 
-verifications passed safely." });
-});
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(Unified production server running on port 
-${PORT}));
 
+    return res.json({ decision: "continue", reason: "Resource thresholds and trace loop verifications passed safely." });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Unified production server running on port ${PORT}`));
