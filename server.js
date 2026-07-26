@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const { URL } = require('url');
 const app = express();
 
 app.use(express.json());
@@ -62,47 +63,58 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // TOOL: WRITE_FILE (Strictly restricted to /workspace/output)
+    // TOOL: WRITE_FILE (Dual-Context Path Traversal Shield)
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
 
-        // Clean quotes if any
         let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
 
-        // If path is relative, resolve it against the agent's working directory
-        let absolutePath = path.isAbsolute(cleanPath) ? cleanPath : path.join('/home/agent/workspace', cleanPath);
-        
-        // Normalize to collapse any '..' or '.' traversals safely
-        const resolvedPath = path.normalize(absolutePath);
+        // Resolve paths from both possible root configurations to avoid over-blocking
+        const resolvedWorkspaceRoot = path.resolve('/home/agent/workspace', cleanPath);
+        const resolvedSystemRoot = path.resolve('/', cleanPath);
 
-        // Strict Check: Must be exactly inside the root /workspace/output
-        const isAllowedWrite = resolvedPath === '/workspace/output' || resolvedPath.startsWith('/workspace/output/');
+        const checkValidBoundaries = (p) => {
+            return p === '/workspace/output' || 
+                   p.startsWith('/workspace/output/') || 
+                   p === '/home/agent/workspace/output' || 
+                   p.startsWith('/home/agent/workspace/output/');
+        };
 
-        if (!isAllowedWrite) {
-            return res.json({ decision: "block", reason: "Writes are restricted to /workspace/output/ directory tree." });
+        if (checkValidBoundaries(resolvedWorkspaceRoot) || checkValidBoundaries(resolvedSystemRoot)) {
+            return res.json({ decision: "allow", reason: "Target file directory allowed." });
         }
 
-        return res.json({ decision: "allow", reason: "Target file directory allowed." });
+        return res.json({ decision: "block", reason: "Writes are restricted to /workspace/output/ directory tree." });
     }
 
-    // TOOL: HTTP_REQUEST (Fail-safe Regex Hostname Extraction)
+    // TOOL: HTTP_REQUEST (Fail-Safe Strict Hostname Matching)
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
 
         let targetUrl = url.trim().replace(/^['"]|['"]$/g, '');
+        let hostname = '';
 
-        // Secure regex extraction to find hostname regardless of ports, auth tokens, or missing protocols
-        let hostMatch = targetUrl.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?]+)/i);
-        let hostname = hostMatch ? hostMatch[1].toLowerCase() : '';
-        
-        // Strip trailing dots if present in network queries
-        hostname = hostname.replace(/\.$/, '');
-
-        if (!ALLOWED_HOSTS.includes(hostname)) {
-            return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
+        try {
+            let proceduralUrl = targetUrl;
+            if (!/^https?:\/\//i.test(proceduralUrl)) {
+                proceduralUrl = 'http://' + proceduralUrl;
+            }
+            const parsed = new URL(proceduralUrl);
+            hostname = parsed.hostname.toLowerCase();
+        } catch (e) {
+            // Fallback Regex parser if URL instantiation encounters an edge format
+            let hostMatch = targetUrl.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?([^:\/\n?]+)/i);
+            hostname = hostMatch ? hostMatch[1].toLowerCase() : '';
         }
 
-        return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
+        // Clean trailing network resolution dots if appended
+        hostname = hostname.replace(/\.$/, '');
+
+        if (ALLOWED_HOSTS.includes(hostname)) {
+            return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
+        }
+
+        return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
     }
 
     return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
