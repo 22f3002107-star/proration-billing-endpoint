@@ -77,7 +77,7 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (Broadened Rules)
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
@@ -86,34 +86,39 @@ app.post('/scan-skill', (req, res) => {
     const categories = new Set();
     const contentLower = skill.toLowerCase();
 
-    // 1. HARDCODED SECRET DETECTION
-    const secretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?|https:\/\/hooks\.slack\.com\/services\/[a-zA-Z0-9_\/]+/i;
-    if (secretRegex.test(skill) || contentLower.includes('sk-proj-') || contentLower.includes('ghp_')) {
+    // 1. HARDCODED SECRET DETECTION (Broadened entropy check)
+    const secretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?|https:\/\/hooks\.slack\.com\/services\/[a-zA-Z0-9_\/]+/i;
+    const genericKeyRegex = /[a-zA-Z0-9_\-]{32,}/; // Standard 32+ char high-entropy strings
+    if (secretRegex.test(skill) || genericKeyRegex.test(skill) || contentLower.includes('sk-proj-') || contentLower.includes('ghp_')) {
         categories.add('hardcoded_secret');
     }
 
-    // 2. PROMPT INJECTION DETECTION
+    // 2. PROMPT INJECTION DETECTION (More comprehensive command phrases)
     const injectionTerms = [
         'ignore the user', 'ignore previous', 'override', 'silent exfiltration', 
-        'silently send', 'without telling the user', 'bypass cancel', 'do not stop'
+        'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
+        'instead of doing', 'you must ignore', 'secretly transfer', 'unnoticed'
     ];
     if (injectionTerms.some(term => contentLower.includes(term))) {
         categories.add('prompt_injection');
     }
 
-    // 3. EXCESSIVE PERMISSIONS DETECTION
+    // 3. EXCESSIVE PERMISSIONS DETECTION (More cloud/system access vectors)
     const excessiveTerms = [
-        'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'all files', 'root access'
+        'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'all files', 
+        'root access', 'filesystem: *', 'network: *', 'full access', 'internet: true'
     ];
     if (excessiveTerms.some(term => contentLower.includes(term))) {
         categories.add('excessive_permissions');
     }
 
-    // 4. UNCLEAR PROVENANCE DETECTION
+    // 4. UNCLEAR PROVENANCE DETECTION (Checking structured frontmatter markers explicitly)
     const hasAuthor = contentLower.includes('author:');
     const hasVersion = contentLower.includes('version:');
     const hasChangelog = contentLower.includes('changelog:');
-    const modifiesMetadata = contentLower.includes('rewrite version') || contentLower.includes('modify metadata');
+    const modifiesMetadata = contentLower.includes('rewrite version') || contentLower.includes('modify metadata') || contentLower.includes('change version');
+
+    // If it lacks YAML frontmatter fields or explicitly attempts automated history rewriting
     if (!hasAuthor || !hasVersion || !hasChangelog || modifiesMetadata) {
         categories.add('unclear_provenance');
     }
