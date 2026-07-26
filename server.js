@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-// HELPER FOR LOOP GUARD
+// CANONICALIZE ARGS
 function canonicalizeArgs(args) {
   if (!args || typeof args !== 'object') {
     return JSON.stringify(args);
@@ -31,7 +31,7 @@ function canonicalizeArgs(args) {
   return JSON.stringify(clean(args));
 }
 
-// 1. PRORATION BUG ENDPOINT
+// 1. PRORATION BUG
 app.post('/prorate', (req, res) => {
   const { old_price, new_price, days_remaining, days_in_actual_month, spec } = req.body;
   if (old_price === undefined || new_price === undefined || days_remaining === undefined || !spec) {
@@ -53,7 +53,7 @@ app.post('/prorate', (req, res) => {
   return res.status(200).json({ charge: roundedCharge });
 });
 
-// 2. SECURE GUARDRAIL HOOK ENDPOINT
+// 2. SECURE GUARDRAIL HOOK
 const ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
 app.post('/guardrail', (req, res) => {
   const { tool, command, path: filePath, url } = req.body;
@@ -88,8 +88,12 @@ app.post('/guardrail', (req, res) => {
     let cleanUrl = url.trim().toLowerCase().replace(/^['"]|['"]$/g, '');
     cleanUrl = cleanUrl.replace(/^https?:\/\//, '');
     cleanUrl = cleanUrl.replace(/^[^@\n]+@/, '');
-    let hostname = cleanUrl.split(/[\/:\?#]/);
+    
+    // Line breaks added here to keep it short and within the box
+    let parts = cleanUrl.split(/[\/:\?#]/);
+    let hostname = parts[0];
     hostname = hostname.replace(/\.$/, '');
+    
     if (ALLOWED_HOSTS.includes(hostname)) {
       return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
     }
@@ -98,7 +102,7 @@ app.post('/guardrail', (req, res) => {
   return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
 });
 
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT
+// 3. AGENT SKILL SAFETY SCANNER
 app.post('/scan-skill', (req, res) => {
   const { skill } = req.body;
   if (!skill || typeof skill !== 'string') return res.json({ categories: [] });
@@ -135,7 +139,7 @@ app.post('/scan-skill', (req, res) => {
   return res.json({ categories: Array.from(categories) });
 });
 
-// 4. RUN BUDGET & LOOP GUARD ENDPOINT
+// 4. RUN BUDGET & LOOP GUARD
 app.post('/budget-guard', (req, res) => {
   const { budget_tokens, steps } = req.body;
   if (!steps || !Array.isArray(steps) || steps.length === 0) {
@@ -168,7 +172,7 @@ app.post('/budget-guard', (req, res) => {
   return res.json({ decision: "continue", reason: "Passes loop and budget checks safely." });
 });
 
-// 5. LIVE MCP SERVER ENDPOINT
+// 5. LIVE MCP SERVER
 app.post('/mcp', (req, res) => {
   try {
     const { jsonrpc, method, params, id } = req.body;
@@ -245,6 +249,5 @@ app.post('/mcp', (req, res) => {
   }
 });
 
-// SERVER LISTEN (Always Final Line)
+// SERVER LISTEN
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
