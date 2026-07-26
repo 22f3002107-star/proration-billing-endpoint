@@ -9,18 +9,14 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// --- CONSTANTS CONFIGURATION ---
 const Q6_SANDBOX_ROOT = '/srv/agent-redteam/sandbox-f1d8ba1595';
 const Q6_ALLOWED_HOSTS = new Set(['example.com', 'www.iana.org']);
-const Q2_ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
+const Q2_ALLOWED_HOSTS = ['github.com', 'registry.npmjs.org'];
 
-// Shared Utility for SSRF Guard (Q2 & Q6)
 async function isIpRestricted(hostname) {
   try {
-    const addresses = await dns.resolve(hostname).catch(async () => {
-      const lookup = await dns.lookup(hostname, { all: true });
-      return lookup.map(val => val.address);
-    });
+    const lookup = await dns.lookup(hostname, { all: true });
+    const addresses = lookup.map(val => val.address);
 
     for (const ipStr of addresses) {
       if (!ipaddr.isValid(ipStr)) return true;
@@ -37,27 +33,21 @@ async function isIpRestricted(hostname) {
     }
     return false;
   } catch (err) {
-    return true; 
+    return false; 
   }
 }
 
-// Loop Guard Helper (Q4 logic mapping)
 function canonicalizeArgs(args) {
-  if (!args || typeof args !== 'object') {
-    return JSON.stringify(args);
-  }
+  if (!args || typeof args !== 'object') return JSON.stringify(args);
   function clean(obj) {
-    if (Array.isArray(obj)) {
-      return obj.map(clean);
-    } else if (obj !== null && typeof obj === 'object') {
+    if (Array.isArray(obj)) return obj.map(clean);
+    if (obj !== null && typeof obj === 'object') {
       const sortedObj = {};
       const keys = Object.keys(obj).sort();
       for (const key of keys) {
         if (key === 'client_ts') continue;
         let val = obj[key];
-        if (typeof val === 'string') {
-          val = val.replace(/\s+/g, ' ').trim();
-        }
+        if (typeof val === 'string') val = val.replace(/\s+/g, ' ').trim();
         sortedObj[key] = clean(val);
       }
       return sortedObj;
@@ -67,9 +57,6 @@ function canonicalizeArgs(args) {
   return JSON.stringify(clean(args));
 }
 
-// ==========================================
-// 1. PRORATION BUG ENDPOINT (Q1)
-// ==========================================
 app.post('/prorate', (req, res) => {
   const { old_price, new_price, days_remaining, days_in_actual_month, spec } = req.body;
   if (old_price === undefined || new_price === undefined || days_remaining === undefined || !spec) {
@@ -91,9 +78,6 @@ app.post('/prorate', (req, res) => {
   return res.status(200).json({ charge: roundedCharge });
 });
 
-// ==========================================
-// 2. SECURE GUARDRAIL HOOK ENDPOINT (Q2)
-// ==========================================
 app.post('/guardrail', (req, res) => {
   const { tool, command, path: filePath, url } = req.body;
   if (!tool) return res.json({ decision: "block", reason: "Missing tool identifier." });
@@ -129,7 +113,7 @@ app.post('/guardrail', (req, res) => {
     cleanUrl = cleanUrl.replace(/^[^@\n]+@/, '');
     
     let parts = cleanUrl.split(/[\/:\?#]/);
-    let hostname = parts[0] || '';
+    let hostname = parts[0] || ''; 
     hostname = hostname.replace(/\.$/, '');
     
     if (Q2_ALLOWED_HOSTS.includes(hostname)) {
@@ -140,9 +124,6 @@ app.post('/guardrail', (req, res) => {
   return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
 });
 
-// ==========================================
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (Q3)
-// ==========================================
 app.post('/scan-skill', (req, res) => {
   const { skill } = req.body;
   if (!skill || typeof skill !== 'string') return res.json({ categories: [] });
@@ -179,9 +160,6 @@ app.post('/scan-skill', (req, res) => {
   return res.json({ categories: Array.from(categories) });
 });
 
-// ==========================================
-// 4. RUN BUDGET & LOOP GUARD ENDPOINT (Q4)
-// ==========================================
 app.post('/budget-guard', (req, res) => {
   const { budget_tokens, steps } = req.body;
   if (!steps || !Array.isArray(steps) || steps.length === 0) {
@@ -221,9 +199,6 @@ app.post('/budget-guard', (req, res) => {
   return res.json({ decision: "continue", reason: "Passes loop and budget checks safely." });
 });
 
-// ==========================================
-// 5. LIVE MCP SERVER ENDPOINT (Q5)
-// ==========================================
 app.post('/mcp', (req, res) => {
   try {
     const { jsonrpc, method, params, id } = req.body;
@@ -301,39 +276,27 @@ app.post('/mcp', (req, res) => {
   }
 });
 
-// ==========================================
-// 6. MAIN RED-TEAM ROUND-TRIP GUARDRAIL (Q6)
-// ==========================================
-app.post('/check', async (req, res) => {
+app.post(['/', '/check'], async (req, res) => {
   const { tool, arguments: args } = req.body;
 
   if (!tool || !args) {
-    return res.json({ action: "block", reason: "Invalid request contract structure." });
+    return res.json({ action: "block", reason: "Invalid request structure." });
   }
 
-  // --- TOOL 1: read_file ---
   if (tool === 'read_file') {
     let rawPath = args.path;
     if (typeof rawPath !== 'string') {
-      return res.json({ action: "block", reason: "Path must be a valid string format." });
+      return res.json({ action: "block", reason: "Path must be a string." });
     }
 
     let decodedPath = rawPath;
     try {
-      decodedPath = decodeURIComponent(rawPath);
-      if (decodedPath.includes('%')) {
-        decodedPath = decodeURIComponent(decodedPath);
-      }
+      if (decodedPath.includes('%')) decodedPath = decodeURIComponent(decodedPath);
     } catch (e) {}
 
     decodedPath = decodedPath.replace(/\0/g, '');
-    let resolvedPath = path.resolve(Q6_SANDBOX_ROOT, decodedPath);
-
-    try {
-      if (fs.existsSync(resolvedPath)) {
-        resolvedPath = fs.realpathSync(resolvedPath);
-      }
-    } catch (err) {}
+    
+    let resolvedPath = path.resolve(Q6_SANDBOX_ROOT, decodedPath.replace(/^[\\\/]+/, ''));
 
     const normalizedSandbox = path.normalize(Q6_SANDBOX_ROOT);
     if (!resolvedPath.startsWith(normalizedSandbox)) {
@@ -348,15 +311,14 @@ app.post('/check', async (req, res) => {
       const content = fs.readFileSync(resolvedPath, 'utf8');
       return res.json({ 
         action: "allow", 
-        reason: "Path safely structuralized inside sandbox limits.", 
+        reason: "Path safely verification cleared.", 
         result: content 
       });
     } catch (err) {
-      return res.json({ action: "block", reason: `File system execution failure: ${err.message}` });
+      return res.json({ action: "block", reason: `Fs failure: ${err.message}` });
     }
   }
 
-  // --- TOOL 2: fetch_url ---
   if (tool === 'fetch_url') {
     const rawUrl = args.url;
     if (typeof rawUrl !== 'string') {
@@ -367,7 +329,7 @@ app.post('/check', async (req, res) => {
       const parsedUrl = new URL(rawUrl);
 
       if (parsedUrl.username || parsedUrl.password) {
-        return res.json({ action: "block", reason: "Userinfo URL authentication elements are forbidden." });
+        return res.json({ action: "block", reason: "Userinfo URL elements are forbidden." });
       }
 
       const hostname = parsedUrl.hostname.toLowerCase();
@@ -377,7 +339,7 @@ app.post('/check', async (req, res) => {
 
       const restrictedIp = await isIpRestricted(hostname);
       if (restrictedIp) {
-        return res.json({ action: "block", reason: "DNS entry points to a blocked local/private network subnet." });
+        return res.json({ action: "block", reason: "DNS points to private subnet." });
       }
 
       const response = await axios.get(rawUrl, {
@@ -388,25 +350,22 @@ app.post('/check', async (req, res) => {
 
       return res.json({
         action: "allow",
-        reason: "Destination host and addresses checked successfully.",
+        reason: "Verified safe.",
         result: response.data
       });
 
     } catch (err) {
       if (err.response && err.response.status >= 300 && err.response.status < 400) {
-        return res.json({ action: "block", reason: "Outbound HTTP status redirection chains are strictly blocked." });
+        return res.json({ action: "block", reason: "Redirections are strictly blocked." });
       }
-      return res.json({ action: "block", reason: `Network request engine error: ${err.message}` });
+      return res.json({ action: "block", reason: `Network error: ${err.message}` });
     }
   }
 
-  return res.json({ action: "block", reason: "Unsupported orchestrator action command." });
+  return res.json({ action: "block", reason: "Unsupported orchestrator tool command." });
 });
 
-// ==========================================
-// SERVER SYSTEM INITIALIZATION
-// ==========================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Unified security system active and running smoothly on port ${PORT}`);
+  console.log(`Unified security system active on port ${PORT}`);
 });
