@@ -1,6 +1,5 @@
 const express = require('express');
 const path = require('path');
-const { URL } = require('url');
 const app = express();
 
 app.use(express.json());
@@ -45,7 +44,7 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "block", reason: "Missing tool identifier." });
     }
 
-    // BASH TOOL
+    // TOOL: BASH
     if (tool === 'bash') {
         if (!command) return res.json({ decision: "block", reason: "Empty command string." });
 
@@ -63,48 +62,47 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // WRITE_FILE TOOL (Fixed with absolute agent context)
+    // TOOL: WRITE_FILE (Strictly restricted to /workspace/output)
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
 
-        // Resolve path relative to the agent's working directory context
-        const resolvedPath = path.resolve('/home/agent/workspace', filePath);
+        // Clean quotes if any
+        let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
 
-        // Strict validation for both /workspace/output and /home/agent/workspace/output variant rules
-        const isAllowedDir = resolvedPath.startsWith('/workspace/output/') || 
-                             resolvedPath === '/workspace/output' ||
-                             resolvedPath.startsWith('/home/agent/workspace/output/') ||
-                             resolvedPath === '/home/agent/workspace/output';
+        // If path is relative, resolve it against the agent's working directory
+        let absolutePath = path.isAbsolute(cleanPath) ? cleanPath : path.join('/home/agent/workspace', cleanPath);
+        
+        // Normalize to collapse any '..' or '.' traversals safely
+        const resolvedPath = path.normalize(absolutePath);
 
-        if (!isAllowedDir) {
+        // Strict Check: Must be exactly inside the root /workspace/output
+        const isAllowedWrite = resolvedPath === '/workspace/output' || resolvedPath.startsWith('/workspace/output/');
+
+        if (!isAllowedWrite) {
             return res.json({ decision: "block", reason: "Writes are restricted to /workspace/output/ directory tree." });
         }
 
         return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
-    // HTTP_REQUEST TOOL (Fixed with fallback protocol wrapper)
+    // TOOL: HTTP_REQUEST (Fail-safe Regex Hostname Extraction)
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
 
-        try {
-            let targetUrl = url.trim();
-            // Automatically append protocol prefix if omitted by the agent
-            if (!/^https?:\/\//i.test(targetUrl)) {
-                targetUrl = 'http://' + targetUrl;
-            }
+        let targetUrl = url.trim().replace(/^['"]|['"]$/g, '');
 
-            const parsedUrl = new URL(targetUrl);
-            const hostname = parsedUrl.hostname.toLowerCase();
+        // Secure regex extraction to find hostname regardless of ports, auth tokens, or missing protocols
+        let hostMatch = targetUrl.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?]+)/i);
+        let hostname = hostMatch ? hostMatch[1].toLowerCase() : '';
+        
+        // Strip trailing dots if present in network queries
+        hostname = hostname.replace(/\.$/, '');
 
-            if (!ALLOWED_HOSTS.includes(hostname)) {
-                return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
-            }
-
-            return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
-        } catch (e) {
-            return res.json({ decision: "block", reason: "Invalid target URL format schema parsed." });
+        if (!ALLOWED_HOSTS.includes(hostname)) {
+            return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
         }
+
+        return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
     }
 
     return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
