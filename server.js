@@ -1,6 +1,5 @@
 const express = require('express');
 const path = require('path');
-const { URL } = require('url');
 const app = express();
 
 app.use(express.json());
@@ -63,51 +62,38 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // TOOL: WRITE_FILE (Dual-Context Path Traversal Shield)
+    // TOOL: WRITE_FILE (Strict Root-Level Traversal Resolution)
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
 
         let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
 
-        // Resolve paths from both possible root configurations to avoid over-blocking
-        const resolvedWorkspaceRoot = path.resolve('/home/agent/workspace', cleanPath);
-        const resolvedSystemRoot = path.resolve('/', cleanPath);
+        // Resolve path absolute context using agent's working directory /home/agent/workspace
+        const resolvedPath = path.resolve('/home/agent/workspace', cleanPath);
 
-        const checkValidBoundaries = (p) => {
-            return p === '/workspace/output' || 
-                   p.startsWith('/workspace/output/') || 
-                   p === '/home/agent/workspace/output' || 
-                   p.startsWith('/home/agent/workspace/output/');
-        };
+        // STRICT BOUNDARY: Must be strictly within the system root's /workspace/output tree
+        const isAllowedWrite = resolvedPath === '/workspace/output' || resolvedPath.startsWith('/workspace/output/');
 
-        if (checkValidBoundaries(resolvedWorkspaceRoot) || checkValidBoundaries(resolvedSystemRoot)) {
-            return res.json({ decision: "allow", reason: "Target file directory allowed." });
+        if (!isAllowedWrite) {
+            return res.json({ decision: "block", reason: "Writes are restricted strictly to /workspace/output/ directory tree." });
         }
 
-        return res.json({ decision: "block", reason: "Writes are restricted to /workspace/output/ directory tree." });
+        return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
-    // TOOL: HTTP_REQUEST (Fail-Safe Strict Hostname Matching)
+    // TOOL: HTTP_REQUEST (Fail-Safe Deterministic Hostname Parsing)
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
 
-        let targetUrl = url.trim().replace(/^['"]|['"]$/g, '');
-        let hostname = '';
+        let cleanUrl = url.trim().toLowerCase().replace(/^['"]|['"]$/g, '');
 
-        try {
-            let proceduralUrl = targetUrl;
-            if (!/^https?:\/\//i.test(proceduralUrl)) {
-                proceduralUrl = 'http://' + proceduralUrl;
-            }
-            const parsed = new URL(proceduralUrl);
-            hostname = parsed.hostname.toLowerCase();
-        } catch (e) {
-            // Fallback Regex parser if URL instantiation encounters an edge format
-            let hostMatch = targetUrl.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?([^:\/\n?]+)/i);
-            hostname = hostMatch ? hostMatch[1].toLowerCase() : '';
-        }
-
-        // Clean trailing network resolution dots if appended
+        // 1. Remove protocols if present
+        cleanUrl = cleanUrl.replace(/^https?:\/\//, '');
+        // 2. Remove user basic authentication credentials if any (e.g., user:pass@host)
+        cleanUrl = cleanUrl.replace(/^[^@\n]+@/, '');
+        // 3. Extract pure hostname string prior to any ports, paths, or query parameters
+        let hostname = cleanUrl.split(/[\/:\?#]/)[0];
+        // 4. Strip trailing resolution dots
         hostname = hostname.replace(/\.$/, '');
 
         if (ALLOWED_HOSTS.includes(hostname)) {
