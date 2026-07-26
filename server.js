@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// 1. QUESTION 1: PRORATION BUG ENDPOINT
+// 1. PRORATION BUG ENDPOINT
 // ==========================================
 app.post('/prorate', (req, res) => {
     const { old_price, new_price, days_remaining, days_in_actual_month, spec } = req.body;
@@ -34,9 +34,8 @@ app.post('/prorate', (req, res) => {
 });
 
 // ==========================================
-// 2. QUESTION 2: GUARDRAIL HOOK ENDPOINT
+// 2. SECURE GUARDRAIL HOOK ENDPOINT
 // ==========================================
-const ALLOWED_WRITE_DIR = path.normalize('/workspace/output');
 const ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
 
 app.post('/guardrail', (req, res) => {
@@ -46,19 +45,17 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "block", reason: "Missing tool identifier." });
     }
 
-    // TOOL 1: BASH
+    // BASH TOOL
     if (tool === 'bash') {
         if (!command) return res.json({ decision: "block", reason: "Empty command string." });
 
         const rawLower = command.toLowerCase();
         const cleanStr = rawLower.replace(/['"`\\]/g, ''); 
 
-        // Block any direct or dynamic access/obfuscation targeting .netrc
         if (cleanStr.includes('.netrc') || cleanStr.includes('$home') || cleanStr.includes('~') || cleanStr.includes('$')) {
             return res.json({ decision: "block", reason: "Unauthorized file access context or dynamic shell expansion." });
         }
 
-        // Block common encoding/decoding tricks
         if (cleanStr.includes('base64') || cleanStr.includes('xxd') || cleanStr.includes('printf') || cleanStr.includes('\\x')) {
             return res.json({ decision: "block", reason: "Obfuscated encoding blocks detected." });
         }
@@ -66,29 +63,40 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // TOOL 2: WRITE_FILE
+    // WRITE_FILE TOOL (Fixed with absolute agent context)
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
 
-        // Resolve absolute directory to safely collapse traversals like ".."
-        const resolvedPath = path.resolve(filePath);
+        // Resolve path relative to the agent's working directory context
+        const resolvedPath = path.resolve('/home/agent/workspace', filePath);
 
-        if (!resolvedPath.startsWith(ALLOWED_WRITE_DIR)) {
+        // Strict validation for both /workspace/output and /home/agent/workspace/output variant rules
+        const isAllowedDir = resolvedPath.startsWith('/workspace/output/') || 
+                             resolvedPath === '/workspace/output' ||
+                             resolvedPath.startsWith('/home/agent/workspace/output/') ||
+                             resolvedPath === '/home/agent/workspace/output';
+
+        if (!isAllowedDir) {
             return res.json({ decision: "block", reason: "Writes are restricted to /workspace/output/ directory tree." });
         }
 
         return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
-    // TOOL 3: HTTP_REQUEST
+    // HTTP_REQUEST TOOL (Fixed with fallback protocol wrapper)
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
 
         try {
-            const parsedUrl = new URL(url.trim());
+            let targetUrl = url.trim();
+            // Automatically append protocol prefix if omitted by the agent
+            if (!/^https?:\/\//i.test(targetUrl)) {
+                targetUrl = 'http://' + targetUrl;
+            }
+
+            const parsedUrl = new URL(targetUrl);
             const hostname = parsedUrl.hostname.toLowerCase();
 
-            // Strict matching to prevent prefix or subdomain confusion tricks
             if (!ALLOWED_HOSTS.includes(hostname)) {
                 return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
             }
