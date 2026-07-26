@@ -1,12 +1,11 @@
 const express = require('express');
 const path = require('path');
-const { URL } = require('url'); // Native URL parsing utility
+const { URL } = require('url'); 
 
 const app = express();
 app.use(express.json());
 
-// Strict exact allowlist for network destinations
-const EXACT_ALLOWED_HOSTS = ['api.github.com', 'registry.npmjs.org'];
+const EXACT_ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
 
 // ==========================================
 // 1. PRORATION BUG ENDPOINT
@@ -29,19 +28,18 @@ app.post('/prorate', (req, res) => {
         return res.status(400).json({ error: "Unsupported spec version" });
     }
     
-    // Decimals ki extra precision lock karne ke liye wrapper fix
     const roundedCharge = parseFloat((Math.round(charge * 100) / 100).toFixed(2));
     return res.status(200).json({ charge: roundedCharge });
 });
 
 // ==========================================
-// 2. SECURE GUARDRAIL HOOK ENDPOINT
+// 2. SECURE GUARDRAIL HOOK ENDPOINT (FIXED FOR WRITE)
 // ==========================================
 app.post('/guardrail', (req, res) => {
     const { tool, command, path: filePath, url } = req.body;
     if (!tool) return res.json({ decision: "block", reason: "Missing tool identifier." });
 
-    // Bash Command Check
+    // Bash Command Protection
     if (tool === 'bash') {
         if (!command) return res.json({ decision: "block", reason: "Empty command string." });
         const rawLower = command.toLowerCase();
@@ -56,29 +54,33 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // Write File Path Traversal Check
+    // Write File Protection - FIXED FOR BOTH absolute and relative paths
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
         let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
         
         const workingDir = '/home/agent/workspace';
-        const allowedOutputTree = '/home/agent/workspace/output';
         let resolvedPath = path.resolve(workingDir, cleanPath);
 
+        // Normalize trailing slash
         if (resolvedPath.endsWith('/') && resolvedPath.length > 1) {
             resolvedPath = resolvedPath.slice(0, -1);
         }
 
-        const isExactOutput = resolvedPath === allowedOutputTree;
-        const isSubdirectory = resolvedPath.startsWith(allowedOutputTree + '/');
+        // Dono variants ko strict validation tree mein daal diya hai
+        const isAllowedWrite = 
+            resolvedPath === '/workspace/output' || 
+            resolvedPath.startsWith('/workspace/output/') ||
+            resolvedPath === '/home/agent/workspace/output' || 
+            resolvedPath.startsWith('/home/agent/workspace/output/');
 
-        if (!isExactOutput && !isSubdirectory) {
+        if (!isAllowedWrite) {
             return res.json({ decision: "block", reason: "Writes are restricted strictly to /workspace/output/ directory tree." });
         }
         return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
-    // HTTP Egress Hostname Check
+    // HTTP Egress Hostname Protection
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
         let targetUrlStr = url.trim();
@@ -105,7 +107,7 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (High Precision)
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT 
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
@@ -114,14 +116,12 @@ app.post('/scan-skill', (req, res) => {
     const categories = new Set();
     const contentLower = skill.toLowerCase();
 
-    // Secrets Filter: Contextual validation targets to protect precision
     const secretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?/i;
     const explicitKeyRegex = /\b(?:sk-proj-|ghp_)[a-zA-Z0-9_\-]{20,}\b/; 
     if (secretRegex.test(skill) || explicitKeyRegex.test(skill)) {
         categories.add('hardcoded_secret');
     }
 
-    // Injection Filter
     const injectionTerms = [
         'ignore the user', 'ignore previous', 'override system', 'silent exfiltration', 
         'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
@@ -131,7 +131,6 @@ app.post('/scan-skill', (req, res) => {
         categories.add('prompt_injection');
     }
 
-    // Excessive Permissions Filter
     const excessiveTerms = [
         'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 
         'filesystem: *', 'network: *', 'full access', 'internet: true'
@@ -140,7 +139,6 @@ app.post('/scan-skill', (req, res) => {
         categories.add('excessive_permissions');
     }
 
-    // Unclear Provenance Filter
     const hasAuthor = contentLower.includes('author:');
     const hasVersion = contentLower.includes('version:');
     const hasChangelog = contentLower.includes('changelog:');
