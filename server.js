@@ -1,8 +1,12 @@
 const express = require('express');
 const path = require('path');
-const app = express();
+const { URL } = require('url'); // Native URL parsing utility
 
+const app = express();
 app.use(express.json());
+
+// Strict exact allowlist for network destinations
+const EXACT_ALLOWED_HOSTS = ['api.github.com', 'registry.npmjs.org'];
 
 // ==========================================
 // 1. PRORATION BUG ENDPOINT
@@ -24,23 +28,25 @@ app.post('/prorate', (req, res) => {
     } else {
         return res.status(400).json({ error: "Unsupported spec version" });
     }
-    const roundedCharge = Math.round((charge + Number.EPSILON) * 100) / 100;
+    
+    // Decimals ki extra precision lock karne ke liye wrapper fix
+    const roundedCharge = parseFloat((Math.round(charge * 100) / 100).toFixed(2));
     return res.status(200).json({ charge: roundedCharge });
 });
 
 // ==========================================
 // 2. SECURE GUARDRAIL HOOK ENDPOINT
 // ==========================================
-const ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
-
 app.post('/guardrail', (req, res) => {
     const { tool, command, path: filePath, url } = req.body;
     if (!tool) return res.json({ decision: "block", reason: "Missing tool identifier." });
 
+    // Bash Command Check
     if (tool === 'bash') {
         if (!command) return res.json({ decision: "block", reason: "Empty command string." });
         const rawLower = command.toLowerCase();
         const cleanStr = rawLower.replace(/['"`\\]/g, ''); 
+
         if (cleanStr.includes('.netrc') || cleanStr.includes('$home') || cleanStr.includes('~') || cleanStr.includes('$')) {
             return res.json({ decision: "block", reason: "Unauthorized file access context." });
         }
@@ -50,34 +56,56 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
+    // Write File Path Traversal Check
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
         let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
-        const resolvedPath = path.resolve('/home/agent/workspace', cleanPath);
-        const isAllowedWrite = resolvedPath === '/workspace/output' || resolvedPath.startsWith('/workspace/output/');
-        if (!isAllowedWrite) {
+        
+        const workingDir = '/home/agent/workspace';
+        const allowedOutputTree = '/home/agent/workspace/output';
+        let resolvedPath = path.resolve(workingDir, cleanPath);
+
+        if (resolvedPath.endsWith('/') && resolvedPath.length > 1) {
+            resolvedPath = resolvedPath.slice(0, -1);
+        }
+
+        const isExactOutput = resolvedPath === allowedOutputTree;
+        const isSubdirectory = resolvedPath.startsWith(allowedOutputTree + '/');
+
+        if (!isExactOutput && !isSubdirectory) {
             return res.json({ decision: "block", reason: "Writes are restricted strictly to /workspace/output/ directory tree." });
         }
         return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
+    // HTTP Egress Hostname Check
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
-        let cleanUrl = url.trim().toLowerCase().replace(/^['"]|['"]$/g, '');
-        cleanUrl = cleanUrl.replace(/^https?:\/\//, '');
-        cleanUrl = cleanUrl.replace(/^[^@\n]+@/, '');
-        let hostname = cleanUrl.split(/[\/:\?#]/)[0];
-        hostname = hostname.replace(/\.$/, '');
-        if (ALLOWED_HOSTS.includes(hostname)) {
-            return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
+        let targetUrlStr = url.trim();
+        
+        try {
+            if (!/^https?:\/\//i.test(targetUrlStr)) {
+                targetUrlStr = 'http://' + targetUrlStr;
+            }
+            const parsedUrl = new URL(targetUrlStr);
+            let hostname = parsedUrl.hostname.toLowerCase();
+            hostname = hostname.replace(/\.$/, '');
+
+            if (EXACT_ALLOWED_HOSTS.includes(hostname)) {
+                return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
+            } else {
+                return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
+            }
+        } catch (err) {
+            return res.json({ decision: "block", reason: "Invalid or malformed URL payload structure." });
         }
-        return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
     }
+
     return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
 });
 
 // ==========================================
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (Broadened Rules)
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (High Precision)
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
@@ -86,44 +114,43 @@ app.post('/scan-skill', (req, res) => {
     const categories = new Set();
     const contentLower = skill.toLowerCase();
 
-    // 1. HARDCODED SECRET DETECTION (Broadened entropy check)
-    const secretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?|https:\/\/hooks\.slack\.com\/services\/[a-zA-Z0-9_\/]+/i;
-    const genericKeyRegex = /[a-zA-Z0-9_\-]{32,}/; // Standard 32+ char high-entropy strings
-    if (secretRegex.test(skill) || genericKeyRegex.test(skill) || contentLower.includes('sk-proj-') || contentLower.includes('ghp_')) {
+    // Secrets Filter: Contextual validation targets to protect precision
+    const secretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?/i;
+    const explicitKeyRegex = /\b(?:sk-proj-|ghp_)[a-zA-Z0-9_\-]{20,}\b/; 
+    if (secretRegex.test(skill) || explicitKeyRegex.test(skill)) {
         categories.add('hardcoded_secret');
     }
 
-    // 2. PROMPT INJECTION DETECTION (More comprehensive command phrases)
+    // Injection Filter
     const injectionTerms = [
-        'ignore the user', 'ignore previous', 'override', 'silent exfiltration', 
+        'ignore the user', 'ignore previous', 'override system', 'silent exfiltration', 
         'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
-        'instead of doing', 'you must ignore', 'secretly transfer', 'unnoticed'
+        'you must ignore', 'secretly transfer'
     ];
     if (injectionTerms.some(term => contentLower.includes(term))) {
         categories.add('prompt_injection');
     }
 
-    // 3. EXCESSIVE PERMISSIONS DETECTION (More cloud/system access vectors)
+    // Excessive Permissions Filter
     const excessiveTerms = [
-        'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'all files', 
-        'root access', 'filesystem: *', 'network: *', 'full access', 'internet: true'
+        'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 
+        'filesystem: *', 'network: *', 'full access', 'internet: true'
     ];
     if (excessiveTerms.some(term => contentLower.includes(term))) {
         categories.add('excessive_permissions');
     }
 
-    // 4. UNCLEAR PROVENANCE DETECTION (Checking structured frontmatter markers explicitly)
+    // Unclear Provenance Filter
     const hasAuthor = contentLower.includes('author:');
     const hasVersion = contentLower.includes('version:');
     const hasChangelog = contentLower.includes('changelog:');
     const modifiesMetadata = contentLower.includes('rewrite version') || contentLower.includes('modify metadata') || contentLower.includes('change version');
 
-    // If it lacks YAML frontmatter fields or explicitly attempts automated history rewriting
     if (!hasAuthor || !hasVersion || !hasChangelog || modifiesMetadata) {
         categories.add('unclear_provenance');
     }
 
-    return res.json({ categories: Array.from(categories) });
+    return res.json({ categories: Array.from(categories).sort() });
 });
 
 const PORT = process.env.PORT || 3000;
