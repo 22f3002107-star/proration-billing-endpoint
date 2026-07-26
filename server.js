@@ -196,3 +196,109 @@ app.post('/budget-guard', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Unified production server running on port ${PORT}`));
+
+// ==========================================
+// 5. LIVE MCP SERVER ENDPOINT (JSON-RPC 2.0 Specifications - Out of box fixed)
+// ==========================================
+app.post('/mcp', (req, res) => {
+    const { jsonrpc, method, params, id } = req.body;
+
+    // Handle standard JSON-RPC notification patterns explicitly 
+    const isNotification = id === undefined || id === null;
+
+    if (jsonrpc !== '2.0') {
+        if (isNotification) return res.status(200).end();
+        return res.status(400).json({ jsonrpc: "2.0", id: id || null, error: { code: -32600, message: "Invalid JSON-RPC version format schema." } });
+    }
+
+    // Handshake Step 1: Initialize Session Configuration
+    if (method === 'initialize') {
+        const clientVersion = params?.protocolVersion || "2024-11-05";
+        return res.json({
+            jsonrpc: "2.0",
+            id: id,
+            result: {
+                protocolVersion: clientVersion,
+                capabilities: {
+                    tools: {}
+                },
+                serverInfo: {
+                    name: "exam-mcp-server",
+                    version: "1.0.0"
+                }
+            }
+        });
+    }
+
+    // Handshake Step 2: Confirmation Notification
+    if (method === 'notifications/initialized' || method.startsWith('notifications/')) {
+        return res.status(200).end();
+    }
+
+    // Capability Discovery: List Tools Schema
+    if (method === 'tools/list') {
+        return res.json({
+            jsonrpc: "2.0",
+            id: id,
+            result: {
+                tools: [
+                    {
+                        name: "solve_challenge",
+                        description: "Deterministic challenge resolution tool required by the grading system.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {}
+                        }
+                    }
+                ]
+            }
+        });
+    }
+
+    // Capability Invocation: Call Tool
+    if (method === 'tools/call') {
+        if (params?.name === 'solve_challenge') {
+            // Read tracking challenge case-insensitively directly from unique incoming HTTP request headers
+            const challenge = req.headers['x-exam-challenge'];
+            const normalizedEmail = "22f3002107@ds.study.iitm.ac.in";
+
+            if (!challenge) {
+                if (isNotification) return res.status(200).end();
+                return res.json({
+                    jsonrpc: "2.0",
+                    id: id,
+                    error: { code: -32602, message: "Missing required X-Exam-Challenge header block." }
+                });
+            }
+
+            // Perform SHA-256 hash matching format logic
+            const fullHash = crypto.createHash('sha256').update(`${challenge}:${normalizedEmail}`).digest('hex');
+            const resultText = fullHash.substring(0, 16).toLowerCase();
+
+            return res.json({
+                jsonrpc: "2.0",
+                id: id,
+                result: {
+                    content: [
+                        {
+                            type: "text",
+                            text: resultText
+                        }
+                    ]
+                }
+            });
+        }
+    }
+
+    // Catch-all response strategy to completely prevent hanging/timeouts
+    if (isNotification) {
+        return res.status(200).end();
+    }
+
+    return res.json({
+        jsonrpc: "2.0",
+        id: id,
+        error: { code: -32601, message: `Method '${method}' is not implemented on this endpoint context.` }
+    });
+});
+
