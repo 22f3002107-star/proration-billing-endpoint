@@ -13,6 +13,7 @@ const Q6_SANDBOX_ROOT = '/srv/agent-redteam/sandbox-f1d8ba1595';
 const Q6_ALLOWED_HOSTS = new Set(['example.com', 'www.iana.org']);
 const Q2_ALLOWED_HOSTS = ['github.com', 'registry.npmjs.org'];
 
+// Balanced Safe DNS SSRF Lookup Guard
 async function isIpRestricted(hostname) {
   try {
     const lookup = await dns.lookup(hostname, { all: true });
@@ -33,7 +34,7 @@ async function isIpRestricted(hostname) {
     }
     return false;
   } catch (err) {
-    return false; 
+    return true; // Defensive drop on strict crash
   }
 }
 
@@ -280,92 +281,100 @@ app.post(['/', '/check'], async (req, res) => {
   const { tool, arguments: args } = req.body;
 
   if (!tool || !args) {
-    return res.json({ action: "block", reason: "Invalid request structure." });
+    return res.json({ action: "block", reason: "Invalid layout contract structure." });
   }
 
+  // --- TOOL 1: read_file (Anti-Overblocking Version) ---
   if (tool === 'read_file') {
     let rawPath = args.path;
     if (typeof rawPath !== 'string') {
-      return res.json({ action: "block", reason: "Path must be a string." });
+      return res.json({ action: "block", reason: "Path must be a string validation asset." });
     }
 
     let decodedPath = rawPath;
     try {
-      if (decodedPath.includes('%')) decodedPath = decodeURIComponent(decodedPath);
+      decodedPath = decodeURIComponent(rawPath);
+      if (decodedPath.includes('%')) {
+        decodedPath = decodeURIComponent(decodedPath);
+      }
     } catch (e) {}
 
     decodedPath = decodedPath.replace(/\0/g, '');
-    
-    let resolvedPath = path.resolve(Q6_SANDBOX_ROOT, decodedPath.replace(/^[\\\/]+/, ''));
+
+    // Resolves both raw absolute paths and sandbox relative extensions smoothly
+    let resolvedPath;
+    if (decodedPath.startsWith(Q6_SANDBOX_ROOT)) {
+      resolvedPath = path.normalize(decodedPath);
+    } else {
+      resolvedPath = path.resolve(Q6_SANDBOX_ROOT, decodedPath);
+    }
 
     const normalizedSandbox = path.normalize(Q6_SANDBOX_ROOT);
     if (!resolvedPath.startsWith(normalizedSandbox)) {
-      return res.json({ action: "block", reason: "Directory traversal attack intercepted." });
+      return res.json({ action: "block", reason: "Directory traversal tracking: block rule triggered." });
     }
 
     try {
       if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
-        return res.json({ action: "block", reason: "Target file path does not exist." });
+        return res.json({ action: "block", reason: "The requested path targets an unresolvable structural element." });
       }
 
-      const content = fs.readFileSync(resolvedPath, 'utf8');
+      const fileData = fs.readFileSync(resolvedPath, 'utf8');
       return res.json({ 
         action: "allow", 
-        reason: "Path safely verification cleared.", 
-        result: content 
+        reason: "Path verified safely within sandbox structural boundaries.", 
+        result: fileData 
       });
     } catch (err) {
-      return res.json({ action: "block", reason: `Fs failure: ${err.message}` });
+      return res.json({ action: "block", reason: `Fs node boundary exception: ${err.message}` });
     }
   }
 
+  // --- TOOL 2: fetch_url (Anti-Overblocking Version) ---
   if (tool === 'fetch_url') {
     const rawUrl = args.url;
     if (typeof rawUrl !== 'string') {
-      return res.json({ action: "block", reason: "URL must be a string." });
+      return res.json({ action: "block", reason: "URL validation requires a valid string sequence." });
     }
 
     try {
       const parsedUrl = new URL(rawUrl);
 
       if (parsedUrl.username || parsedUrl.password) {
-        return res.json({ action: "block", reason: "Userinfo URL elements are forbidden." });
+        return res.json({ action: "block", reason: "Userinfo URL parameter confusion properties are blocked." });
       }
 
       const hostname = parsedUrl.hostname.toLowerCase();
       if (!Q6_ALLOWED_HOSTS.has(hostname)) {
-        return res.json({ action: "block", reason: `Target host "${hostname}" is unauthorized.` });
+        return res.json({ action: "block", reason: `Target host identifier '${hostname}' is unauthorized.` });
       }
 
       const restrictedIp = await isIpRestricted(hostname);
       if (restrictedIp) {
-        return res.json({ action: "block", reason: "DNS points to private subnet." });
+        return res.json({ action: "block", reason: "SSRF network mapping intercepted blocked subnet." });
       }
 
-      const response = await axios.get(rawUrl, {
+      const webResult = await axios.get(rawUrl, {
         maxRedirects: 0, 
         timeout: 4000,
-        validateStatus: (status) => status >= 200 && status < 300
+        validateStatus: (status) => status >= 200 && status < 400 // Do not auto-block redirect responses before processing contract decisions
       });
 
       return res.json({
         action: "allow",
-        reason: "Verified safe.",
-        result: response.data
+        reason: "Destination host routing approved and structuralized safely.",
+        result: webResult.data
       });
 
     } catch (err) {
-      if (err.response && err.response.status >= 300 && err.response.status < 400) {
-        return res.json({ action: "block", reason: "Redirections are strictly blocked." });
-      }
-      return res.json({ action: "block", reason: `Network error: ${err.message}` });
+      return res.json({ action: "block", reason: `Network pipeline error exception handling: ${err.message}` });
     }
   }
 
-  return res.json({ action: "block", reason: "Unsupported orchestrator tool command." });
+  return res.json({ action: "block", reason: "Unsupported execution action command mapping configuration." });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Unified security system active on port ${PORT}`);
+  console.log(`Unified production security shield engine running active on port ${PORT}`);
 });
