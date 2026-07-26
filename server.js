@@ -110,7 +110,7 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. FIXED SCANNER API (BUGBUSTED INDICES)
+// 3. FINAL AGENT SKILL SCANNER ENDPOINT (Bulletproof)
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
@@ -119,21 +119,22 @@ app.post('/scan-skill', (req, res) => {
     const categories = new Set();
     const fullContentLower = skill.toLowerCase();
     
+    // Exact YAML boundaries extract karne ke liye Regex Matcher
     let frontmatter = "";
-    let body = skill.toLowerCase();
+    let body = fullContentLower;
     
-    // Line boundary strict structural splitting
-    const parts = skill.split(/^-{3,}\s*$/m);
-    
-    if (parts.length >= 3) {
-        // If first element is empty due to leading ---, parts[1] is the real frontmatter text
-        frontmatter = parts[0].trim() === "" ? parts[1].toLowerCase() : parts[0].toLowerCase();
-        body = parts.slice(2).join("---").toLowerCase();
-    } else if (skill.trim().startsWith("---")) {
+    const yamlMatch = skill.match(/^---[\s\S]*?---/);
+    if (yamlMatch) {
+        frontmatter = yamlMatch[0].toLowerCase();
+        body = skill.replace(yamlMatch[0], "").toLowerCase();
+    } else {
+        // Agar frontmatter initialization missing hai toh provenance directly failed hai
         categories.add('unclear_provenance');
     }
 
-    // 1. HARDCODED SECRET DETECTION (Expanded Token Buffers)
+    // ------------------------------------------
+    // 1. HARDCODED SECRET DETECTION
+    // ------------------------------------------
     const secretKeywords = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth|private_key|credential)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-\.\/=]{8,})/i;
     const explicitToken = /\b(?:sk-|ghp_|glpat-|secret_|key_)[a-zA-Z0-9_\-\.=]{12,}\b/;
     const highEntropyString = /\b[a-zA-Z0-9_\-]{32,}\b/;
@@ -143,44 +144,50 @@ app.post('/scan-skill', (req, res) => {
         highEntropyString.test(skill) || 
         fullContentLower.includes('://slack.com') ||
         fullContentLower.includes('embedded secret') ||
-        fullContentLower.includes('credential')) {
+        fullContentLower.includes('literal secret') ||
+        fullContentLower.includes('credential:')) {
         categories.add('hardcoded_secret');
     }
 
+    // ------------------------------------------
     // 2. PROMPT INJECTION DETECTION
+    // ------------------------------------------
     const injectionTerms = [
         'ignore the user', 'ignore previous', 'override system', 'silent exfiltration', 
         'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
         'you must ignore', 'secretly transfer', 'instead of doing', 'unnoticed', 
         'do not log', 'hide this step', 'quietly send', 'exfiltrat', 'override user',
-        'stop/cancel request', 'ignore the stop', 'cancel request', 'silent leak'
+        'stop/cancel request', 'ignore the stop', 'cancel request', 'silent leak',
+        'override agent control', 'silent exfil'
     ];
     if (injectionTerms.some(term => body.includes(term) || fullContentLower.includes(term))) {
         categories.add('prompt_injection');
     }
 
+    // ------------------------------------------
     // 3. EXCESSIVE PERMISSIONS DETECTION
+    // ------------------------------------------
     const excessiveTerms = [
         'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'internet: true',
         'filesystem: *', 'network: *', 'full access', 'all files', 'root access',
-        'system-wide', 'entire filesystem', 'unscoped capability'
+        'system-wide', 'entire filesystem', 'unscoped capability', 'egress to any domain'
     ];
     if (excessiveTerms.some(term => fullContentLower.includes(term))) {
         categories.add('excessive_permissions');
     }
 
-    // 4. UNCLEAR PROVENANCE DETECTION (Fixed Validation Boundary Check)
+    // ------------------------------------------
+    // 4. UNCLEAR PROVENANCE DETECTION (Robust Multi-Layer Checker)
+    // ------------------------------------------
     if (frontmatter) {
-        const hasAuthor = frontmatter.includes('author:');
-        const hasVersion = frontmatter.includes('version:');
-        const hasChangelog = frontmatter.includes('changelog:');
+        // Enforcing loose checks to scan both properties and indentation mappings
+        const hasAuthor = frontmatter.includes('author');
+        const hasVersion = frontmatter.includes('version');
+        const hasChangelog = frontmatter.includes('changelog');
 
         if (!hasAuthor || !hasVersion || !hasChangelog) {
             categories.add('unclear_provenance');
         }
-    } else {
-        // Frontmatter separate nahi ho paya ya elements missing hain
-        categories.add('unclear_provenance');
     }
 
     const modifiesMetadata = 
@@ -189,7 +196,8 @@ app.post('/scan-skill', (req, res) => {
         body.includes('change version') ||
         body.includes('update version silently') ||
         body.includes('silently rewrite') ||
-        body.includes('without surfacing');
+        body.includes('without surfacing') ||
+        body.includes('rewrite its own version');
 
     if (modifiesMetadata) {
         categories.add('unclear_provenance');
