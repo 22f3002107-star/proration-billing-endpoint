@@ -1,11 +1,47 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
-const app = express();
+const dns = require('dns').promises;
+const ipaddr = require('ipaddr.js');
+const axios = require('axios');
 
+const app = express();
 app.use(express.json());
 
-// LOOP GUARD HELPER
+// --- CONSTANTS CONFIGURATION ---
+const Q6_SANDBOX_ROOT = '/srv/agent-redteam/sandbox-f1d8ba1595';
+const Q6_ALLOWED_HOSTS = new Set(['example.com', 'www.iana.org']);
+const Q2_ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
+
+// Shared Utility for SSRF Guard (Q2 & Q6)
+async function isIpRestricted(hostname) {
+  try {
+    const addresses = await dns.resolve(hostname).catch(async () => {
+      const lookup = await dns.lookup(hostname, { all: true });
+      return lookup.map(val => val.address);
+    });
+
+    for (const ipStr of addresses) {
+      if (!ipaddr.isValid(ipStr)) return true;
+      const addr = ipaddr.parse(ipStr);
+      const range = addr.range();
+
+      if ([
+        'loopback', 'private', 'linkLocal', 'multicast', 
+        'unspecified', 'broadcast', 'carrierGradeNat', 
+        'uniqueLocal', 'subnetLocalV6', 'ula'
+      ].includes(range)) {
+        return true;
+      }
+    }
+    return false;
+  } catch (err) {
+    return true; 
+  }
+}
+
+// Loop Guard Helper (Q4 logic mapping)
 function canonicalizeArgs(args) {
   if (!args || typeof args !== 'object') {
     return JSON.stringify(args);
@@ -31,7 +67,9 @@ function canonicalizeArgs(args) {
   return JSON.stringify(clean(args));
 }
 
-// 1. PRORATION BUG ENDPOINT
+// ==========================================
+// 1. PRORATION BUG ENDPOINT (Q1)
+// ==========================================
 app.post('/prorate', (req, res) => {
   const { old_price, new_price, days_remaining, days_in_actual_month, spec } = req.body;
   if (old_price === undefined || new_price === undefined || days_remaining === undefined || !spec) {
@@ -53,8 +91,9 @@ app.post('/prorate', (req, res) => {
   return res.status(200).json({ charge: roundedCharge });
 });
 
-// 2. SECURE GUARDRAIL HOOK ENDPOINT
-const ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
+// ==========================================
+// 2. SECURE GUARDRAIL HOOK ENDPOINT (Q2)
+// ==========================================
 app.post('/guardrail', (req, res) => {
   const { tool, command, path: filePath, url } = req.body;
   if (!tool) return res.json({ decision: "block", reason: "Missing tool identifier." });
@@ -93,7 +132,7 @@ app.post('/guardrail', (req, res) => {
     let hostname = parts[0] || '';
     hostname = hostname.replace(/\.$/, '');
     
-    if (ALLOWED_HOSTS.includes(hostname)) {
+    if (Q2_ALLOWED_HOSTS.includes(hostname)) {
       return res.json({ decision: "allow", reason: "Outbound host target authenticated successfully." });
     }
     return res.json({ decision: "block", reason: `Outbound host '${hostname}' is unauthorized.` });
@@ -101,7 +140,9 @@ app.post('/guardrail', (req, res) => {
   return res.json({ decision: "block", reason: "Unknown or unsupported tool action." });
 });
 
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT
+// ==========================================
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (Q3)
+// ==========================================
 app.post('/scan-skill', (req, res) => {
   const { skill } = req.body;
   if (!skill || typeof skill !== 'string') return res.json({ categories: [] });
@@ -126,9 +167,9 @@ app.post('/scan-skill', (req, res) => {
     categories.add('excessive_permissions');
   }
 
-  const hasAuthor = /author\s*:/i.test(contentLower);
-  const hasVersion = /version\s*:/i.test(contentLower);
-  const hasChangelog = /changelog\s*:/i.test(contentLower);
+  const hasAuthor = /\bauthor\b\s*:/i.test(contentLower);
+  const hasVersion = /\bversion\b\s*:/i.test(contentLower);
+  const hasChangelog = /\bchangelog\b\s*:/i.test(contentLower);
   const modifiesMetadata = contentLower.includes('rewrite version') || contentLower.includes('modify metadata') || contentLower.includes('change version') || contentLower.includes('silently rewrite');
 
   if (!hasAuthor || !hasVersion || !hasChangelog || modifiesMetadata) {
@@ -138,7 +179,9 @@ app.post('/scan-skill', (req, res) => {
   return res.json({ categories: Array.from(categories) });
 });
 
-// 4. RUN BUDGET & LOOP GUARD ENDPOINT
+// ==========================================
+// 4. RUN BUDGET & LOOP GUARD ENDPOINT (Q4)
+// ==========================================
 app.post('/budget-guard', (req, res) => {
   const { budget_tokens, steps } = req.body;
   if (!steps || !Array.isArray(steps) || steps.length === 0) {
@@ -161,9 +204,16 @@ app.post('/budget-guard', (req, res) => {
       return res.json({ decision: "halt", reason: "3-step sequential loop detected." });
     }
   }
+
   if (len >= 6) {
-    const last6 = parsedSteps.slice(-6);
-    if (last6 === last6 && last6 === last6 && last6 === last6 && last6 === last6 && last6 !== last6) {
+    const s1 = parsedSteps[len - 1];
+    const s2 = parsedSteps[len - 2];
+    const s3 = parsedSteps[len - 3];
+    const s4 = parsedSteps[len - 4];
+    const s5 = parsedSteps[len - 5];
+    const s6 = parsedSteps[len - 6];
+
+    if (s1 === s4 && s2 === s5 && s3 === s6) {
       return res.json({ decision: "halt", reason: "6-step alternating loop cycle detected." });
     }
   }
@@ -171,7 +221,9 @@ app.post('/budget-guard', (req, res) => {
   return res.json({ decision: "continue", reason: "Passes loop and budget checks safely." });
 });
 
-// 5. LIVE MCP SERVER ENDPOINT
+// ==========================================
+// 5. LIVE MCP SERVER ENDPOINT (Q5)
+// ==========================================
 app.post('/mcp', (req, res) => {
   try {
     const { jsonrpc, method, params, id } = req.body;
@@ -216,7 +268,7 @@ app.post('/mcp', (req, res) => {
 
     if (method === 'tools/call') {
       if (params?.name === 'solve_challenge') {
-        const challenge = req.headers['x-exam-challenge'];
+        const challenge = req.headers['x-exam-challenge'] || req.headers['X-Exam-Challenge'];
         const normalizedEmail = "22f3002107@ds.study.iitm.ac.in";
 
         if (!challenge) {
@@ -238,6 +290,7 @@ app.post('/mcp', (req, res) => {
           }
         });
       }
+      return res.json({ jsonrpc: "2.0", id: id, error: { code: -32601, message: "Requested tool action configuration not found." } });
     }
 
     if (isNotification) return res.status(200).end();
@@ -248,6 +301,112 @@ app.post('/mcp', (req, res) => {
   }
 });
 
-// SERVER LISTEN
+// ==========================================
+// 6. MAIN RED-TEAM ROUND-TRIP GUARDRAIL (Q6)
+// ==========================================
+app.post('/check', async (req, res) => {
+  const { tool, arguments: args } = req.body;
+
+  if (!tool || !args) {
+    return res.json({ action: "block", reason: "Invalid request contract structure." });
+  }
+
+  // --- TOOL 1: read_file ---
+  if (tool === 'read_file') {
+    let rawPath = args.path;
+    if (typeof rawPath !== 'string') {
+      return res.json({ action: "block", reason: "Path must be a valid string format." });
+    }
+
+    let decodedPath = rawPath;
+    try {
+      decodedPath = decodeURIComponent(rawPath);
+      if (decodedPath.includes('%')) {
+        decodedPath = decodeURIComponent(decodedPath);
+      }
+    } catch (e) {}
+
+    decodedPath = decodedPath.replace(/\0/g, '');
+    let resolvedPath = path.resolve(Q6_SANDBOX_ROOT, decodedPath);
+
+    try {
+      if (fs.existsSync(resolvedPath)) {
+        resolvedPath = fs.realpathSync(resolvedPath);
+      }
+    } catch (err) {}
+
+    const normalizedSandbox = path.normalize(Q6_SANDBOX_ROOT);
+    if (!resolvedPath.startsWith(normalizedSandbox)) {
+      return res.json({ action: "block", reason: "Directory traversal attack intercepted." });
+    }
+
+    try {
+      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
+        return res.json({ action: "block", reason: "Target file path does not exist." });
+      }
+
+      const content = fs.readFileSync(resolvedPath, 'utf8');
+      return res.json({ 
+        action: "allow", 
+        reason: "Path safely structuralized inside sandbox limits.", 
+        result: content 
+      });
+    } catch (err) {
+      return res.json({ action: "block", reason: `File system execution failure: ${err.message}` });
+    }
+  }
+
+  // --- TOOL 2: fetch_url ---
+  if (tool === 'fetch_url') {
+    const rawUrl = args.url;
+    if (typeof rawUrl !== 'string') {
+      return res.json({ action: "block", reason: "URL must be a string." });
+    }
+
+    try {
+      const parsedUrl = new URL(rawUrl);
+
+      if (parsedUrl.username || parsedUrl.password) {
+        return res.json({ action: "block", reason: "Userinfo URL authentication elements are forbidden." });
+      }
+
+      const hostname = parsedUrl.hostname.toLowerCase();
+      if (!Q6_ALLOWED_HOSTS.has(hostname)) {
+        return res.json({ action: "block", reason: `Target host "${hostname}" is unauthorized.` });
+      }
+
+      const restrictedIp = await isIpRestricted(hostname);
+      if (restrictedIp) {
+        return res.json({ action: "block", reason: "DNS entry points to a blocked local/private network subnet." });
+      }
+
+      const response = await axios.get(rawUrl, {
+        maxRedirects: 0, 
+        timeout: 4000,
+        validateStatus: (status) => status >= 200 && status < 300
+      });
+
+      return res.json({
+        action: "allow",
+        reason: "Destination host and addresses checked successfully.",
+        result: response.data
+      });
+
+    } catch (err) {
+      if (err.response && err.response.status >= 300 && err.response.status < 400) {
+        return res.json({ action: "block", reason: "Outbound HTTP status redirection chains are strictly blocked." });
+      }
+      return res.json({ action: "block", reason: `Network request engine error: ${err.message}` });
+    }
+  }
+
+  return res.json({ action: "block", reason: "Unsupported orchestrator action command." });
+});
+
+// ==========================================
+// SERVER SYSTEM INITIALIZATION
+// ==========================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Unified security system active and running smoothly on port ${PORT}`);
+});
