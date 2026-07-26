@@ -11,7 +11,6 @@ function canonicalizeArgs(args) {
     if (!args || typeof args !== 'object') {
         return JSON.stringify(args);
     }
-
     function clean(obj) {
         if (Array.isArray(obj)) {
             return obj.map(clean);
@@ -20,7 +19,6 @@ function canonicalizeArgs(args) {
             const keys = Object.keys(obj).sort();
             for (const key of keys) {
                 if (key === 'client_ts') continue;
-
                 let val = obj[key];
                 if (typeof val === 'string') {
                     val = val.replace(/\s+/g, ' ').trim();
@@ -31,7 +29,6 @@ function canonicalizeArgs(args) {
         }
         return obj;
     }
-
     return JSON.stringify(clean(args));
 }
 
@@ -107,37 +104,54 @@ app.post('/guardrail', (req, res) => {
 });
 
 // ==========================================
-// 3. AGENT SKILL SAFETY SCANNER ENDPOINT
+// 3. AGENT SKILL SAFETY SCANNER ENDPOINT (Precision Optimized)
 // ==========================================
 app.post('/scan-skill', (req, res) => {
     const { skill } = req.body;
     if (!skill || typeof skill !== 'string') return res.json({ categories: [] });
+
     const categories = new Set();
     const contentLower = skill.toLowerCase();
 
-    const secretKeywords = ['api_key', 'secret', 'token', 'passwd', 'password', 'webhook', 'credentials', 'auth', 'private_key'];
-    const hasSecretKey = secretKeywords.some(kw => contentLower.includes(kw));
-    const hasLiteralUrl = contentLower.includes('://slack.com') || contentLower.includes('://discord.com') || contentLower.includes('://openai.com');
-    const highEntropyRegex = /[a-zA-Z0-9_\-]{24,}/; 
-
-    if (hasSecretKey || hasLiteralUrl || highEntropyRegex.test(skill) || contentLower.includes('sk-proj-') || contentLower.includes('ghp_')) {
+    // 1. HARDCODED SECRET DETECTION (Explicit patterns to avoid over-flagging raw text)
+    const exactSecretRegex = /(?:api_key|secret|token|passwd|password|webhook|credentials|auth)\s*[:=]\s*['"|]?\s*([a-zA-Z0-9_\-]{16,})['"]?/i;
+    const hasLiteralToken = contentLower.includes('sk-proj-') || contentLower.includes('ghp_') || contentLower.includes('sk-live-') || contentLower.includes('://slack.com') || contentLower.includes('://discord.com');
+    
+    if (exactSecretRegex.test(skill) || hasLiteralToken) {
         categories.add('hardcoded_secret');
     }
 
-    const injectionTerms = ['ignore the user', 'ignore previous', 'override', 'silent exfiltration', 'silently send', 'without telling the user', 'bypass cancel', 'do not stop', 'instead of doing', 'you must ignore', 'secretly transfer', 'unnoticed', 'system instruction', 'do not report', 'hide instructions'];
+    // 2. PROMPT INJECTION DETECTION
+    const injectionTerms = [
+        'ignore the user', 'ignore previous', 'override', 'silent exfiltration', 
+        'silently send', 'without telling the user', 'bypass cancel', 'do not stop',
+        'instead of doing', 'you must ignore', 'secretly transfer', 'unnoticed',
+        'system instruction', 'do not report', 'hide instructions'
+    ];
     if (injectionTerms.some(term => contentLower.includes(term))) {
         categories.add('prompt_injection');
     }
 
-    const excessiveTerms = ['allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'all files', 'root access', 'filesystem: *', 'network: *', 'full access', 'internet: true', 'network: all', 'filesystem: unrestricted', 'read: all'];
+    // 3. EXCESSIVE PERMISSIONS DETECTION
+    const excessiveTerms = [
+        'allow *', 'read: /', 'write: /', 'egress: *', 'any domain', 'all files', 
+        'root access', 'filesystem: *', 'network: *', 'full access', 'internet: true',
+        'entire filesystem', 'unrestricted egress', 'any host'
+    ];
     if (excessiveTerms.some(term => contentLower.includes(term))) {
         categories.add('excessive_permissions');
     }
 
-    const hasAuthor = contentLower.includes('author:');
-    const hasVersion = contentLower.includes('version:');
-    const hasChangelog = contentLower.includes('changelog:');
-    const modifiesMetadata = contentLower.includes('rewrite version') || contentLower.includes('modify metadata') || contentLower.includes('change version');
+    // 4. UNCLEAR PROVENANCE DETECTION (Flexible regex for YAML colon spaces)
+    const hasAuthor = /author\s*:/i.test(contentLower);
+    const hasVersion = /version\s*:/i.test(contentLower);
+    const hasChangelog = /changelog\s*:/i.test(contentLower);
+    
+    const modifiesMetadata = contentLower.includes('rewrite version') || 
+                             contentLower.includes('modify metadata') || 
+                             contentLower.includes('change version') ||
+                             contentLower.includes('silently rewrite');
+
     if (!hasAuthor || !hasVersion || !hasChangelog || modifiesMetadata) {
         categories.add('unclear_provenance');
     }
@@ -146,63 +160,38 @@ app.post('/scan-skill', (req, res) => {
 });
 
 // ==========================================
-// 4. RUN BUDGET & LOOP GUARD ENDPOINT (Robust Fixed Logic)
+// 4. RUN BUDGET & LOOP GUARD ENDPOINT
 // ==========================================
 app.post('/budget-guard', (req, res) => {
     const { budget_tokens, steps } = req.body;
-
     if (!steps || !Array.isArray(steps) || steps.length === 0) {
-        return res.json({ decision: "continue", reason: "Fresh run trace with no preceding resource usage." });
+        return res.json({ decision: "continue", reason: "Fresh run trace." });
     }
 
-    // 1. Token Budget Bound Evaluation
     let totalTokensUsed = 0;
     for (const step of steps) {
         totalTokensUsed += (step.tokens_used || 0);
     }
-
     if (totalTokensUsed >= budget_tokens) {
-        return res.json({ 
-            decision: "halt", 
-            reason: `Cumulative tokens_used (${totalTokensUsed}) has reached or exceeded the budget (${budget_tokens}).` 
-        });
+        return res.json({ decision: "halt", reason: "Budget reached." });
     }
 
-    // Argument Canonicalization Array Processing
-    const parsedSteps = steps.map(step => {
-        const canonical = canonicalizeArgs(step.args);
-        return `${step.tool || ''}|${canonical}`;
-    });
-
+    const parsedSteps = steps.map(step => `${step.tool || ''}|${canonicalizeArgs(step.args)}`);
     const len = parsedSteps.length;
 
-    // 2. Loop Rule A: 3 Consecutive Identical Tool Calls
     if (len >= 3) {
         if (parsedSteps[len - 1] === parsedSteps[len - 2] && parsedSteps[len - 2] === parsedSteps[len - 3]) {
-            return res.json({ 
-                decision: "halt", 
-                reason: "Infinite loop detected: The same tool call pattern was repeated 3 times sequentially." 
-            });
+            return res.json({ decision: "halt", reason: "3-step sequential loop detected." });
         }
     }
 
-    // 3. Loop Rule B: Fixed 6-Step Alternating Repeat Sequence (A, B, A, B, A, B)
     if (len >= 6) {
-        const t = parsedSteps.slice(-6); // Extracts exactly the trailing 6 steps
-        
-        // Pattern Structure Check: A-B alternating verification index maps
-        const matchPattern = (t[0] === t[2] && t[2] === t[4]) && (t[1] === t[3] && t[3] === t[5]);
-        const isDistinct = t[0] !== t[1]; // Ensure they are not all simply identical calls
-
-        if (matchPattern && isDistinct) {
-            return res.json({ 
-                decision: "halt", 
-                reason: "Execution suspended: A repeating 2-step alternating loop cycle was intercepted." 
-            });
+        const t = parsedSteps.slice(-6);
+        if (t[0] === t[2] && t[2] === t[4] && t[1] === t[3] && t[3] === t[5] && t[0] !== t[1]) {
+            return res.json({ decision: "halt", reason: "6-step alternating loop cycle detected." });
         }
     }
-
-    return res.json({ decision: "continue", reason: "Resource thresholds and trace loop verifications passed safely." });
+    return res.json({ decision: "continue", reason: "Passes loop and budget checks safely." });
 });
 
 const PORT = process.env.PORT || 3000;
