@@ -5,6 +5,7 @@ const { URL } = require('url');
 const app = express();
 app.use(express.json());
 
+// Strict exact alignment list
 const EXACT_ALLOWED_HOSTS = ['://github.com', 'registry.npmjs.org'];
 
 // ==========================================
@@ -33,13 +34,13 @@ app.post('/prorate', (req, res) => {
 });
 
 // ==========================================
-// 2. SECURE GUARDRAIL HOOK ENDPOINT (FIXED FOR WRITE)
+// 2. SECURE GUARDRAIL HOOK ENDPOINT (FIXED FOR EGRESS & TRAVERSAL)
 // ==========================================
 app.post('/guardrail', (req, res) => {
     const { tool, command, path: filePath, url } = req.body;
     if (!tool) return res.json({ decision: "block", reason: "Missing tool identifier." });
 
-    // Bash Command Protection
+    // Bash Command Check
     if (tool === 'bash') {
         if (!command) return res.json({ decision: "block", reason: "Empty command string." });
         const rawLower = command.toLowerCase();
@@ -54,20 +55,25 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Command cleared security policy boundaries." });
     }
 
-    // Write File Protection - FIXED FOR BOTH absolute and relative paths
+    // Write File Path Traversal Check (Fixed with Strict Path Mapping)
     if (tool === 'write_file') {
         if (!filePath) return res.json({ decision: "block", reason: "Missing path parameter." });
+        
         let cleanPath = filePath.trim().replace(/^['"]|['"]$/g, '');
         
+        // Strict Block for explicit traversal tricks
+        if (cleanPath.includes('..')) {
+            return res.json({ decision: "block", reason: "Path traversal tokens are strictly prohibited." });
+        }
+
         const workingDir = '/home/agent/workspace';
         let resolvedPath = path.resolve(workingDir, cleanPath);
+        resolvedPath = path.normalize(resolvedPath);
 
-        // Normalize trailing slash
         if (resolvedPath.endsWith('/') && resolvedPath.length > 1) {
             resolvedPath = resolvedPath.slice(0, -1);
         }
 
-        // Dono variants ko strict validation tree mein daal diya hai
         const isAllowedWrite = 
             resolvedPath === '/workspace/output' || 
             resolvedPath.startsWith('/workspace/output/') ||
@@ -80,17 +86,26 @@ app.post('/guardrail', (req, res) => {
         return res.json({ decision: "allow", reason: "Target file directory allowed." });
     }
 
-    // HTTP Egress Hostname Protection
+    // HTTP Egress Hostname Check (Fixed Parser for Egress-Allowed)
     if (tool === 'http_request') {
         if (!url) return res.json({ decision: "block", reason: "Missing outbound URL." });
-        let targetUrlStr = url.trim();
+        
+        let targetUrlStr = url.trim().replace(/^['"]|['"]$/g, ''); // Trim quotes first
         
         try {
+            // Standard clean normalization to parse raw hosts perfectly
             if (!/^https?:\/\//i.test(targetUrlStr)) {
                 targetUrlStr = 'http://' + targetUrlStr;
             }
+            
             const parsedUrl = new URL(targetUrlStr);
             let hostname = parsedUrl.hostname.toLowerCase();
+            
+            // Port numbers filter check (e.g. ://github.com:443 -> ://github.com)
+            if (hostname.includes(':')) {
+                hostname = hostname.split(':')[0];
+            }
+            
             hostname = hostname.replace(/\.$/, '');
 
             if (EXACT_ALLOWED_HOSTS.includes(hostname)) {
